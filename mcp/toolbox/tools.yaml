@@ -1,0 +1,90 @@
+# Google MCP Toolbox: a fixed, curated set of tools instead of free-form SQL.
+# Connects as the read-only role. Env vars are substituted by Toolbox at startup.
+kind: source
+name: olist-pg
+type: postgres
+host: db
+port: 5432
+database: ${POSTGRES_DB}
+user: mcp_readonly
+password: ${MCP_READONLY_PASSWORD}
+---
+kind: tool
+name: list_tables
+type: postgres-list-tables
+source: olist-pg
+description: Lists tables, columns, keys and constraints in the database. Use first to discover the schema.
+---
+kind: tool
+name: revenue_by_category_month
+type: postgres-sql
+source: olist-pg
+description: |
+  Monthly revenue (sum of item price) and order count per product category for delivered orders.
+  Takes a year (2016 to 2018) and returns up to 200 rows ordered by month and revenue.
+statement: |
+  SELECT date_trunc('month', o.order_purchase_timestamp)::date AS month,
+         coalesce(t.product_category_name_english, p.product_category_name, 'unknown') AS category,
+         count(DISTINCT o.order_id) AS orders,
+         round(sum(i.price), 2) AS revenue
+    FROM olist.orders o
+    JOIN olist.order_items i ON i.order_id = o.order_id
+    JOIN olist.products p ON p.product_id = i.product_id
+    LEFT JOIN olist.product_category_name_translation t ON t.product_category_name = p.product_category_name
+   WHERE o.order_status = 'delivered'
+     AND extract(year FROM o.order_purchase_timestamp) = $1::int
+   GROUP BY 1, 2
+   ORDER BY 1, 4 DESC
+   LIMIT 200
+parameters:
+  - name: year
+    type: integer
+    description: Calendar year of the order purchase date, between 2016 and 2018.
+---
+kind: tool
+name: late_delivery_rate_by_state
+type: postgres-sql
+source: olist-pg
+description: |
+  Share of delivered orders that arrived after the estimated delivery date, per customer state.
+  Takes no parameters.
+statement: |
+  SELECT c.customer_state AS state,
+         count(*) AS delivered_orders,
+         round(100.0 * avg((o.order_delivered_customer_date > o.order_estimated_delivery_date)::int), 1) AS late_pct
+    FROM olist.orders o
+    JOIN olist.customers c ON c.customer_id = o.customer_id
+   WHERE o.order_status = 'delivered' AND o.order_delivered_customer_date IS NOT NULL
+   GROUP BY 1
+   ORDER BY late_pct DESC
+---
+kind: tool
+name: seller_scorecard
+type: postgres-sql
+source: olist-pg
+description: |
+  Scorecard for one seller: item count, revenue, average review score and late delivery percentage.
+  Takes a seller_id (32 character hex string). Do not guess seller ids.
+statement: |
+  SELECT i.seller_id,
+         count(*) AS items,
+         round(sum(i.price), 2) AS revenue,
+         round(avg(r.review_score), 2) AS avg_review,
+         round(100.0 * avg((o.order_delivered_customer_date > o.order_estimated_delivery_date)::int), 1) AS late_pct
+    FROM olist.order_items i
+    JOIN olist.orders o ON o.order_id = i.order_id
+    LEFT JOIN olist.order_reviews r ON r.order_id = o.order_id
+   WHERE i.seller_id = $1 AND o.order_status = 'delivered'
+   GROUP BY i.seller_id
+parameters:
+  - name: seller_id
+    type: string
+    description: Seller identifier from olist.sellers.seller_id.
+---
+kind: toolset
+name: marketplace
+tools:
+  - list_tables
+  - revenue_by_category_month
+  - late_delivery_rate_by_state
+  - seller_scorecard

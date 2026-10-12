@@ -1,0 +1,196 @@
+name: pgmcplab
+
+services:
+  db:
+    build:
+      context: .
+      dockerfile: Dockerfile.postgres
+    image: pgmcplab-postgres:18.6-alpine-hypopg1.4.3
+    container_name: pgmcplab-db
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      - -c
+      - pg_stat_statements.track=all
+      - -c
+      - track_io_timing=on
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      MCP_READONLY_PASSWORD: ${MCP_READONLY_PASSWORD}
+      MCP_ADMIN_PASSWORD: ${MCP_ADMIN_PASSWORD}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      # PG 18 images keep PGDATA under /var/lib/postgresql/18/docker
+      - pgdata:/var/lib/postgresql
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+      - ./db/data:/dataset:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 600s   # first start loads 1.5M rows (1 to 6 minutes depending on the disk); failures here do not count
+
+  # ---- Web UIs (start with the default `docker compose up -d`) ------------
+  pgadmin:
+    image: dpage/pgadmin4:9.18.0
+    container_name: pgmcplab-pgadmin
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD}
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+      PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: "False"
+      PGADMIN_SERVER_JSON_FILE: /pgadmin4/servers.json
+      PGPASSWORD_LAB: ${POSTGRES_PASSWORD}
+    ports:
+      - "127.0.0.1:5050:80"
+    volumes:
+      - ./mcp/pgadmin/servers.json:/pgadmin4/servers.json:ro
+    # pgAdmin needs a 0600 passfile owned by its user, so build it at start.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - printf 'db:5432:*:postgres:%s\n' "$$PGPASSWORD_LAB" > /tmp/pgpass && chmod 600 /tmp/pgpass && exec /entrypoint.sh
+
+  mcp-inspector:
+    image: ghcr.io/modelcontextprotocol/inspector:2.10.1
+    container_name: pgmcplab-inspector
+    # --catalog pre-registers the four lab servers (compose network names) instead of the three samples
+    command: ["--web", "--catalog", "/config/catalog.json"]
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+        reservations:
+          cpus: "0.1"
+          memory: 128M
+    environment:
+      HOST: 0.0.0.0
+      MCP_AUTO_OPEN_ENABLED: "false"
+      MCP_INSPECTOR_API_TOKEN: ${MCP_INSPECTOR_API_TOKEN}
+    volumes:
+      - ./mcp/inspector/catalog.json:/config/catalog.json:ro
+    ports:
+      - "127.0.0.1:6274:6274"
+      - "127.0.0.1:6277:6277"
+
+  # ---- MCP servers (profile "mcp" starts all of them) ---------------------
+  # A. Reference read-only Postgres MCP behind a stdio -> Streamable HTTP bridge
+  mcp-reference:
+    profiles: ["mcp", "reference"]
+    build:
+      context: ./mcp/reference
+    image: pgmcplab-mcp-reference:0.6.2
+    container_name: pgmcplab-mcp-reference
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+        reservations:
+          cpus: "0.1"
+          memory: 128M
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      MCP_READONLY_PASSWORD: ${MCP_READONLY_PASSWORD}
+    ports:
+      - "127.0.0.1:8100:8000"   # http://127.0.0.1:8100/mcp
+
+  # B1. crystaldba, restricted access mode, read-only DB role
+  mcp-crystaldba-restricted:
+    profiles: ["mcp", "crystaldba", "crystaldba-restricted"]
+    image: crystaldba/postgres-mcp:0.3.0
+    container_name: pgmcplab-mcp-crystaldba-restricted
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URI: postgresql://mcp_readonly:${MCP_READONLY_PASSWORD}@db:5432/${POSTGRES_DB}
+    command: ["--access-mode=restricted", "--transport=sse", "--sse-host=0.0.0.0", "--sse-port=8000"]
+    ports:
+      - "127.0.0.1:8101:8000"   # http://127.0.0.1:8101/sse
+
+  # B2. crystaldba, unrestricted access mode, admin DB role (can change schema)
+  mcp-crystaldba-unrestricted:
+    profiles: ["mcp", "crystaldba", "crystaldba-unrestricted"]
+    image: crystaldba/postgres-mcp:0.3.0
+    container_name: pgmcplab-mcp-crystaldba-unrestricted
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URI: postgresql://mcp_admin:${MCP_ADMIN_PASSWORD}@db:5432/${POSTGRES_DB}
+    command: ["--access-mode=unrestricted", "--transport=sse", "--sse-host=0.0.0.0", "--sse-port=8000"]
+    ports:
+      - "127.0.0.1:8102:8000"   # http://127.0.0.1:8102/sse
+
+  # C. Google MCP Toolbox: curated tools from tools.yaml, read-only role
+  mcp-toolbox:
+    profiles: ["mcp", "toolbox"]
+    image: us-central1-docker.pkg.dev/database-toolbox/toolbox/toolbox:1.13.1
+    container_name: pgmcplab-mcp-toolbox
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+        reservations:
+          cpus: "0.1"
+          memory: 128M
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      MCP_READONLY_PASSWORD: ${MCP_READONLY_PASSWORD}
+    command: ["--config", "/config/tools.yaml", "--address", "0.0.0.0", "--port", "5000"]
+    volumes:
+      - ./mcp/toolbox/tools.yaml:/config/tools.yaml:ro
+    ports:
+      - "127.0.0.1:5000:5000"   # http://127.0.0.1:5000/mcp
+
+volumes:
+  pgdata:

@@ -1,0 +1,9 @@
+# Files run inside Linux containers or by bash must keep LF line endings
+* text=auto
+*.sh text eol=lf
+*.sql text eol=lf
+*.mjs text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.json text eol=lf
+Dockerfile* text eol=lf

@@ -1,0 +1,14 @@
+# secrets and local env
+.env
+
+# downloaded dataset (fetched by scripts/fetch-dataset)
+db/data/*
+!db/data/.gitkeep
+
+# query logs written by hooks
+logs/*
+!logs/.gitkeep
+
+# local Claude Code state
+.claude/settings.local.json
+.claude/plans/
