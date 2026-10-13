@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "hooks": {
+    "preToolUse": [
+      {
+        "type": "command",
+        "bash": "node scripts/hooks/guard-sql.mjs",
+        "powershell": "node scripts/hooks/guard-sql.mjs",
+        "cwd": ".",
+        "timeoutSec": 10
+      }
+    ]
+  }
+}
